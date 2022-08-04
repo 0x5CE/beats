@@ -36,4 +36,5 @@ import (
 	_ "github.com/elastic/beats/v7/packetbeat/protos/sip"
 	_ "github.com/elastic/beats/v7/packetbeat/protos/thrift"
 	_ "github.com/elastic/beats/v7/packetbeat/protos/tls"
+	_ "github.com/elastic/beats/v7/packetbeat/protos/mssql"
 )

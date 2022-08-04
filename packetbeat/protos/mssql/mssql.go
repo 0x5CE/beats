@@ -1,50 +1,149 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package mssql
 
 import (
+	"strings"
 	"time"
 
 	"github.com/elastic/beats/v7/libbeat/common"
 	conf "github.com/elastic/elastic-agent-libs/config"
 	"github.com/elastic/elastic-agent-libs/logp"
+	"github.com/elastic/elastic-agent-libs/mapstr"
+	"github.com/elastic/elastic-agent-libs/monitoring"
 
+	"github.com/elastic/beats/v7/packetbeat/pb"
 	"github.com/elastic/beats/v7/packetbeat/procs"
 	"github.com/elastic/beats/v7/packetbeat/protos"
 	"github.com/elastic/beats/v7/packetbeat/protos/tcp"
 )
 
-// mssqlPlugin application level protocol analyzer plugin
-type mssqlPlugin struct {
-	ports        protos.PortsConfig
-	parserConfig parserConfig
-	transConfig  transactionConfig
-	watcher      procs.ProcessesWatcher
-	pub          transPub
-}
-
-// Application Layer tcp stream data to be stored on tcp connection context.
-type connection struct {
-	streams [2]*stream
-	trans   transactions
-}
-
-// Uni-directional tcp stream state for parsing messages.
-type stream struct {
-	parser parser
-}
-
 var (
-	debugf = logp.MakeDebug("mssql")
-
-	// use isDebug/isDetailed to guard debugf/detailedf to minimize allocations
-	// (garbage collection) when debug log is disabled.
-	isDebug = false
+	unmatchedRequests  = monitoring.NewInt(nil, "mssql.unmatched_requests")
+	unmatchedResponses = monitoring.NewInt(nil, "mssql.unmatched_responses")
 )
+
+type mssqlMessage struct {
+	start int
+	end   int
+
+	ts            time.Time
+	isRequest     bool
+	size          uint64
+	tables        string
+	isError       bool
+	errorCode     uint16
+	errorInfo     string
+	query         string
+	ignoreMessage bool
+
+	direction    uint8
+	tcpTuple     common.TCPTuple
+	cmdlineTuple *common.ProcessTuple
+	raw          []byte
+	notes        []string
+
+	statementID    int
+	numberOfParams int
+}
+
+type mssqlTransaction struct {
+	tuple    common.TCPTuple
+	src      common.Endpoint
+	dst      common.Endpoint
+	ts       time.Time
+	endTime  time.Time
+	query    string
+	method   string
+	path     string // for mssql, Path refers to the mssql table queried
+	bytesOut uint64
+	bytesIn  uint64
+	notes    []string
+	isError  bool
+
+	mssql mapstr.M
+
+	requestRaw  string
+	responseRaw string
+
+	params []string // for execute statement param
+}
+
+type mssqlStream struct {
+	data []byte
+
+	parseOffset int
+	parseState  parseState
+	isClient    bool
+
+	message *mssqlMessage
+}
+
+type parseState int
+
+const (
+	mssqlStateStart parseState = iota
+	mssqlStateEatMessage
+	mssqlStateEatFields
+	mssqlStateEatRows
+
+	mssqlStateMax
+)
+
+var stateStrings = []string{
+	"Start",
+	"EatMessage",
+	"EatFields",
+	"EatRows",
+}
+
+func (state parseState) String() string {
+	return stateStrings[state]
+}
+
+type mssqlPlugin struct {
+
+	// config
+	ports        []int
+	maxStoreRows int
+	maxRowLength int
+	sendRequest  bool
+	sendResponse bool
+
+	transactions       *common.Cache
+	transactionTimeout time.Duration
+
+	// prepare statements cache
+	prepareStatements       *common.Cache
+	prepareStatementTimeout time.Duration
+
+	results protos.Reporter
+	watcher procs.ProcessesWatcher
+
+	// function pointer for mocking
+	handleMssql func(mssql *mssqlPlugin, m *mssqlMessage, tcp *common.TCPTuple,
+		dir uint8, raw_msg []byte)
+}
 
 func init() {
 	protos.Register("mssql", New)
 }
 
-// New create and initializes a new mssql protocol analyzer instance.
 func New(
 	testMode bool,
 	results protos.Reporter,
@@ -65,124 +164,172 @@ func New(
 	return p, nil
 }
 
-func (mp *mssqlPlugin) init(results protos.Reporter, watcher procs.ProcessesWatcher, config *mssqlConfig) error {
-	if err := mp.setFromConfig(config); err != nil {
-		return err
-	}
-	mp.pub.results = results
-	mp.watcher = watcher
+func (mssql *mssqlPlugin) init(results protos.Reporter, watcher procs.ProcessesWatcher, config *mssqlConfig) error {
+	mssql.setFromConfig(config)
 
-	isDebug = logp.IsDebug("http")
-	return nil
-}
+	mssql.transactions = common.NewCache(
+		mssql.transactionTimeout,
+		protos.DefaultTransactionHashSize)
+	mssql.transactions.StartJanitor(mssql.transactionTimeout)
 
-func (mp *mssqlPlugin) setFromConfig(config *mssqlConfig) error {
+	// prepare statements cache
+	mssql.prepareStatements = common.NewCache(
+		mssql.prepareStatementTimeout,
+		protos.DefaultTransactionHashSize)
+	mssql.prepareStatements.StartJanitor(mssql.prepareStatementTimeout)
 
-	// set module configuration
-	if err := mp.ports.Set(config.Ports); err != nil {
-		return err
-	}
-
-	// set parser configuration
-	parser := &mp.parserConfig
-	parser.maxBytes = tcp.TCPMaxDataInStream
-
-	// set transaction correlator configuration
-	trans := &mp.transConfig
-	trans.transactionTimeout = config.TransactionTimeout
-
-	// set transaction publisher configuration
-	pub := &mp.pub
-	pub.sendRequest = config.SendRequest
-	pub.sendResponse = config.SendResponse
+	mssql.handleMssql = handleMssql
+	mssql.results = results
+	mssql.watcher = watcher
 
 	return nil
 }
 
-// ConnectionTimeout returns the per stream connection timeout.
-// Return <=0 to set default tcp module transaction timeout.
-func (mp *mssqlPlugin) ConnectionTimeout() time.Duration {
-	return mp.transConfig.transactionTimeout
+func (mssql *mssqlPlugin) setFromConfig(config *mssqlConfig) {
+	mssql.ports = config.Ports
+	mssql.maxRowLength = config.MaxRowLength
+	mssql.maxStoreRows = config.MaxRows
+	mssql.sendRequest = config.SendRequest
+	mssql.sendResponse = config.SendResponse
+	mssql.transactionTimeout = config.TransactionTimeout
+	mssql.prepareStatementTimeout = config.StatementTimeout
 }
 
-// GetPorts returns the ports numbers packets shall be processed for.
-func (mp *mssqlPlugin) GetPorts() []int {
-	return mp.ports.Ports
+func (mssql *mssqlPlugin) getTransaction(k common.HashableTCPTuple) *mssqlTransaction {
+	v := mssql.transactions.Get(k)
+	if v != nil {
+		return v.(*mssqlTransaction)
+	}
+	return nil
 }
 
-// Parse processes a TCP packet. Return nil if connection
-// state shall be dropped (e.g. parser not in sync with tcp stream)
-func (mp *mssqlPlugin) Parse(
-	pkt *protos.Packet,
-	tcptuple *common.TCPTuple, dir uint8,
-	private protos.ProtocolData,
+// cache the prepare statement info
+type mssqlStmtData struct {
+	query           string
+	numOfParameters int
+}
+type mssqlStmtMap map[int]*mssqlStmtData
+
+func (mssql *mssqlPlugin) getStmtsMap(k common.HashableTCPTuple) mssqlStmtMap {
+	v := mssql.prepareStatements.Get(k)
+	if v != nil {
+		return v.(mssqlStmtMap)
+	}
+	return nil
+}
+
+func (mssql *mssqlPlugin) GetPorts() []int {
+	return mssql.ports
+}
+
+func (stream *mssqlStream) prepareForNewMessage() {
+	stream.data = stream.data[stream.parseOffset:]
+	stream.parseState = mssqlStateStart
+	stream.parseOffset = 0
+	stream.message = nil
+}
+
+func (mssql *mssqlPlugin) isServerPort(port uint16) bool {
+	for _, sPort := range mssql.ports {
+		if uint16(sPort) == port {
+			return true
+		}
+	}
+	return false
+}
+
+type mssqlPrivateData struct {
+	data [2]*mssqlStream
+}
+
+// Called when the parser has identified a full message.
+func (mssql *mssqlPlugin) messageComplete(tcptuple *common.TCPTuple, dir uint8, stream *mssqlStream) {
+	// all ok, ship it
+	msg := stream.data[stream.message.start:stream.message.end]
+
+	if !stream.message.ignoreMessage {
+		mssql.handleMssql(mssql, stream.message, tcptuple, dir, msg)
+	}
+
+	// and reset message
+	stream.prepareForNewMessage()
+}
+
+func (mssql *mssqlPlugin) ConnectionTimeout() time.Duration {
+	return mssql.transactionTimeout
+}
+
+func (mssql *mssqlPlugin) Parse(pkt *protos.Packet, tcptuple *common.TCPTuple,
+	dir uint8, private protos.ProtocolData,
 ) protos.ProtocolData {
-	defer logp.Recover("Parse mssqlPlugin exception")
+	defer logp.Recover("ParseMssql exception")
 
-	conn := mp.ensureConnection(private)
-	st := conn.streams[dir]
-	if st == nil {
-		st = &stream{}
-		st.parser.init(&mp.parserConfig, func(msg *message) error {
-			return conn.trans.onMessage(tcptuple.IPPort(), dir, msg)
-		})
-		conn.streams[dir] = st
+	priv := mssqlPrivateData{}
+	if private != nil {
+		var ok bool
+		priv, ok = private.(mssqlPrivateData)
+		if !ok {
+			priv = mssqlPrivateData{}
+		}
 	}
 
-	if err := st.parser.feed(pkt.Ts, pkt.Payload); err != nil {
-		debugf("%v, dropping TCP stream for error in direction %v.", err, dir)
-		mp.onDropConnection(conn)
-		return nil
-	}
-	return conn
-}
-
-// ReceivedFin handles TCP-FIN packet.
-func (mp *mssqlPlugin) ReceivedFin(
-	tcptuple *common.TCPTuple, dir uint8,
-	private protos.ProtocolData,
-) protos.ProtocolData {
-	return private
-}
-
-// GapInStream handles lost packets in tcp-stream.
-func (mp *mssqlPlugin) GapInStream(tcptuple *common.TCPTuple, dir uint8,
-	nbytes int,
-	private protos.ProtocolData,
-) (protos.ProtocolData, bool) {
-	conn := getConnection(private)
-	if conn != nil {
-		mp.onDropConnection(conn)
+	if priv.data[dir] == nil {
+		dstPort := tcptuple.DstPort
+		if dir == tcp.TCPDirectionReverse {
+			dstPort = tcptuple.SrcPort
+		}
+		priv.data[dir] = &mssqlStream{
+			data:     pkt.Payload,
+			message:  &mssqlMessage{ts: pkt.Ts},
+			isClient: mssql.isServerPort(dstPort),
+		}
+	} else {
+		// concatenate bytes
+		priv.data[dir].data = append(priv.data[dir].data, pkt.Payload...)
+		if len(priv.data[dir].data) > tcp.TCPMaxDataInStream {
+			logp.Debug("mssql", "Stream data too large, dropping TCP stream")
+			priv.data[dir] = nil
+			return priv
+		}
 	}
 
-	return nil, true
-}
+	stream := priv.data[dir]
+	for len(stream.data) > 0 {
+		if stream.message == nil {
+			stream.message = &mssqlMessage{ts: pkt.Ts}
+		}
 
-// onDropConnection processes and optionally sends incomplete
-// transaction in case of connection being dropped due to error
-func (mp *mssqlPlugin) onDropConnection(conn *connection) {
-}
+		ok, complete := mssqlMessageParser(priv.data[dir])
 
-func (mp *mssqlPlugin) ensureConnection(private protos.ProtocolData) *connection {
-	conn := getConnection(private)
-	if conn == nil {
-		conn = &connection{}
-		conn.trans.init(&mp.transConfig, mp.watcher, mp.pub.onTransaction)
+		logp.Debug("mssqldetailed", "mssqlMessageParser returned ok=%v complete=%v", ok, complete)
+		if !ok {
+			priv.data[dir] = nil
+			logp.Debug("mssql", "Ignore MSSQL message. Drop tcp stream. Try parsing with the next segment")
+			return priv
+		}
+
+		if complete {
+			mssql.messageComplete(tcptuple, dir, stream)
+		} else {
+			// wait for more data
+			break
+		}
 	}
-	return conn
+	return priv
 }
 
-func (conn *connection) dropStreams() {
-	conn.streams[0] = nil
-	conn.streams[1] = nil
+func mssqlMessageParser(s *mssqlStream) (bool, bool) {
+	logp.Debug("mssqldetailed", "MSSQL parser called. parseState = %s", s.parseState)
+
+	return true, true
 }
 
-func getConnection(private protos.ProtocolData) *connection {
+func getConnection(private protos.ProtocolData) *mssqlPrivateData {
 	if private == nil {
 		return nil
 	}
 
-	priv, ok := private.(*connection)
+	priv, ok := private.(*mssqlPrivateData)
 	if !ok {
 		logp.Warn("mssql connection type error")
 		return nil
@@ -192,4 +339,188 @@ func getConnection(private protos.ProtocolData) *connection {
 		return nil
 	}
 	return priv
+}
+
+func (mssql *mssqlPlugin) GapInStream(tcptuple *common.TCPTuple, dir uint8,
+	nbytes int, private protos.ProtocolData) (priv protos.ProtocolData, drop bool,
+) {
+	defer logp.Recover("GapInStream(mssql) exception")
+
+	conn := getConnection(private)
+	if conn != nil {
+	}
+
+	return nil, true
+}
+
+func (mssql *mssqlPlugin) ReceivedFin(tcptuple *common.TCPTuple, dir uint8,
+	private protos.ProtocolData,
+) protos.ProtocolData {
+	return private
+}
+
+func handleMssql(mssql *mssqlPlugin, m *mssqlMessage, tcptuple *common.TCPTuple,
+	dir uint8, rawMsg []byte,
+) {
+	m.tcpTuple = *tcptuple
+	m.direction = dir
+	m.cmdlineTuple = mssql.watcher.FindProcessesTupleTCP(tcptuple.IPPort())
+	m.raw = rawMsg
+
+	if m.isRequest {
+		mssql.receivedMssqlRequest(m)
+	} else {
+		mssql.receivedMssqlResponse(m)
+	}
+}
+
+func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
+	tuple := msg.tcpTuple
+	trans := mssql.getTransaction(tuple.Hashable())
+	if trans != nil {
+		if trans.mssql != nil {
+			logp.Debug("mssql", "Two requests without a Response. Dropping old request: %s", trans.mssql)
+			unmatchedRequests.Add(1)
+		}
+	} else {
+		trans = &mssqlTransaction{tuple: tuple}
+		mssql.transactions.Put(tuple.Hashable(), trans)
+	}
+
+	trans.ts = msg.ts
+	trans.src, trans.dst = common.MakeEndpointPair(msg.tcpTuple.BaseTuple, msg.cmdlineTuple)
+	if msg.direction == tcp.TCPDirectionReverse {
+		trans.src, trans.dst = trans.dst, trans.src
+	}
+
+	trans.query = msg.query
+
+	query := strings.Trim(trans.query, " \r\n\t")
+	index := strings.IndexAny(query, " \r\n\t")
+	var method string
+	if index > 0 {
+		method = strings.ToUpper(query[:index])
+	} else {
+		method = strings.ToUpper(query)
+	}
+
+	trans.query = query
+	trans.method = method
+
+	trans.mssql = mapstr.M{}
+
+	trans.notes = msg.notes
+
+	// save Raw message
+	trans.requestRaw = msg.query
+	trans.bytesIn = msg.size
+}
+
+func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
+	trans := mssql.getTransaction(msg.tcpTuple.Hashable())
+	if trans == nil {
+		logp.Debug("mssql", "Response from unknown transaction. Ignoring.")
+		unmatchedResponses.Add(1)
+		return
+	}
+	// check if the request was received
+	if trans.mssql == nil {
+		logp.Debug("mssql", "Response from unknown transaction. Ignoring.")
+		unmatchedResponses.Add(1)
+		return
+
+	}
+	// save json details
+	trans.mssql.Update(mapstr.M{
+		//"affected_rows": msg.affectedRows,
+	})
+	trans.isError = msg.isError
+	if trans.isError {
+		trans.mssql["error_code"] = msg.errorCode
+		trans.mssql["error_message"] = msg.errorInfo
+	}
+	if msg.statementID != 0 {
+		// cache prepare statement response info
+		stmts := mssql.getStmtsMap(msg.tcpTuple.Hashable())
+		if stmts == nil {
+			stmts = mssqlStmtMap{}
+		}
+		if stmts[msg.statementID] == nil {
+			stmtData := &mssqlStmtData{
+				query:           trans.query,
+				numOfParameters: msg.numberOfParams,
+			}
+			stmts[msg.statementID] = stmtData
+		}
+		mssql.prepareStatements.Put(msg.tcpTuple.Hashable(), stmts)
+		trans.notes = append(trans.notes, trans.query)
+		trans.query = "Request Prepare Statement"
+	}
+
+	trans.bytesOut = msg.size
+	trans.path = msg.tables
+	trans.endTime = msg.ts
+
+	// save Raw message
+	if len(msg.raw) > 0 {
+		//fields, rows := mssql.parseMssqlResponse(msg.raw)
+
+		//trans.responseRaw = common.DumpInCSVFormat("", "")
+	}
+
+	trans.notes = append(trans.notes, msg.notes...)
+
+	mssql.publishTransaction(trans)
+	mssql.transactions.Delete(trans.tuple.Hashable())
+
+	logp.Debug("mssql", "Mssql transaction completed: %s %s %s", trans.query, trans.params, trans.mssql)
+}
+
+func (mssql *mssqlPlugin) publishTransaction(t *mssqlTransaction) {
+	if mssql.results == nil {
+		return
+	}
+
+	logp.Debug("mssql", "mssql.results exists")
+
+	evt, pbf := pb.NewBeatEvent(t.ts)
+	pbf.SetSource(&t.src)
+	pbf.AddIP(t.src.IP)
+	pbf.SetDestination(&t.dst)
+	pbf.AddIP(t.dst.IP)
+	pbf.Source.Bytes = int64(t.bytesIn)
+	pbf.Destination.Bytes = int64(t.bytesOut)
+	pbf.Event.Dataset = "mssql"
+	pbf.Event.Start = t.ts
+	pbf.Event.End = t.endTime
+	pbf.Network.Transport = "tcp"
+	pbf.Network.Protocol = "mssql"
+	pbf.Error.Message = t.notes
+
+	fields := evt.Fields
+	fields["type"] = pbf.Event.Dataset
+	fields["method"] = t.method
+	fields["query"] = t.query
+	fields["mssql"] = t.mssql
+	if len(t.path) > 0 {
+		fields["path"] = t.path
+	}
+	if len(t.params) > 0 {
+		fields["params"] = t.params
+	}
+
+	if t.isError {
+		fields["status"] = common.ERROR_STATUS
+	} else {
+		fields["status"] = common.OK_STATUS
+	}
+
+	if mssql.sendRequest {
+		fields["request"] = t.requestRaw
+	}
+	if mssql.sendResponse {
+		fields["response"] = t.responseRaw
+	}
+
+	mssql.results(evt)
 }
