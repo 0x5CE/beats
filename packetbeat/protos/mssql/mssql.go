@@ -18,6 +18,7 @@
 package mssql
 
 import (
+	"encoding/binary"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/elastic/elastic-agent-libs/logp"
 	"github.com/elastic/elastic-agent-libs/mapstr"
 	"github.com/elastic/elastic-agent-libs/monitoring"
+	"golang.org/x/text/encoding/unicode"
 
 	"github.com/elastic/beats/v7/packetbeat/pb"
 	"github.com/elastic/beats/v7/packetbeat/procs"
@@ -101,8 +103,6 @@ const (
 	mssqlStateEatMessage
 	mssqlStateEatFields
 	mssqlStateEatRows
-
-	mssqlStateMax
 )
 
 var stateStrings = []string{
@@ -223,7 +223,7 @@ func (mssql *mssqlPlugin) GetPorts() []int {
 }
 
 func (stream *mssqlStream) prepareForNewMessage() {
-	stream.data = stream.data[stream.parseOffset:]
+	stream.data = nil
 	stream.parseState = mssqlStateStart
 	stream.parseOffset = 0
 	stream.message = nil
@@ -265,6 +265,7 @@ func (mssql *mssqlPlugin) Parse(pkt *protos.Packet, tcptuple *common.TCPTuple,
 	defer logp.Recover("ParseMssql exception")
 
 	priv := mssqlPrivateData{}
+
 	if private != nil {
 		var ok bool
 		priv, ok = private.(mssqlPrivateData)
@@ -299,7 +300,7 @@ func (mssql *mssqlPlugin) Parse(pkt *protos.Packet, tcptuple *common.TCPTuple,
 			stream.message = &mssqlMessage{ts: pkt.Ts}
 		}
 
-		ok, complete := mssqlMessageParser(priv.data[dir])
+		ok, complete := mssql.mssqlMessageParser(priv.data[dir])
 
 		logp.Debug("mssqldetailed", "mssqlMessageParser returned ok=%v complete=%v", ok, complete)
 		if !ok {
@@ -318,9 +319,65 @@ func (mssql *mssqlPlugin) Parse(pkt *protos.Packet, tcptuple *common.TCPTuple,
 	return priv
 }
 
-func mssqlMessageParser(s *mssqlStream) (bool, bool) {
+func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 	logp.Debug("mssqldetailed", "MSSQL parser called. parseState = %s", s.parseState)
 
+	s.message.start = s.parseOffset
+	s.message.end = s.parseOffset
+
+	msgType := s.data[s.parseOffset]
+
+	switch msgType {
+	case 1:
+		return parseQueryBatch(s)
+	case 4:
+		s.message.isRequest = false
+		s.message.size = 1
+		return true, true // response
+	case 18:
+		return parsePrelogin(s)
+	default:
+		logp.Debug("mssqldetailed", "MSSQL unknown message type = %d", msgType)
+		s.message.ignoreMessage = true
+		s.message.size = 1
+		return false, false
+	}
+}
+
+func parseQueryBatch(s *mssqlStream) (bool, bool) {
+	s.message.isRequest = true
+
+	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
+
+	if int(length) < len(s.data) {
+		return true, false
+	}
+
+	headerLen := binary.LittleEndian.Uint32(s.data[s.parseOffset+8:])
+	headerType := binary.LittleEndian.Uint16(s.data[s.parseOffset+16:])
+
+	if headerType != 2 {
+		return false, true // wrong header
+	}
+
+	// MSSQL uses UTF16
+	decoder := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
+	query, _ := decoder.Bytes(s.data[uint32(s.parseOffset)+8+headerLen : length])
+
+	s.message.query = strings.Trim(string(query), " \r\n\t")
+
+	s.message.start = s.parseOffset
+	s.message.end += len(s.message.query)
+	s.message.end += 1 // type
+	s.message.size = uint64(s.message.end - s.message.start)
+
+	return true, true
+}
+
+func parsePrelogin(s *mssqlStream) (bool, bool) {
+	s.message.isRequest = s.isClient
+	s.message.size = 1
+	s.message.ignoreMessage = true
 	return true, true
 }
 
@@ -346,9 +403,7 @@ func (mssql *mssqlPlugin) GapInStream(tcptuple *common.TCPTuple, dir uint8,
 ) {
 	defer logp.Recover("GapInStream(mssql) exception")
 
-	conn := getConnection(private)
-	if conn != nil {
-	}
+	_ = getConnection(private)
 
 	return nil, true
 }
@@ -377,6 +432,7 @@ func handleMssql(mssql *mssqlPlugin, m *mssqlMessage, tcptuple *common.TCPTuple,
 func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
 	tuple := msg.tcpTuple
 	trans := mssql.getTransaction(tuple.Hashable())
+
 	if trans != nil {
 		if trans.mssql != nil {
 			logp.Debug("mssql", "Two requests without a Response. Dropping old request: %s", trans.mssql)
@@ -418,6 +474,7 @@ func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
 
 func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans := mssql.getTransaction(msg.tcpTuple.Hashable())
+
 	if trans == nil {
 		logp.Debug("mssql", "Response from unknown transaction. Ignoring.")
 		unmatchedResponses.Add(1)
@@ -428,12 +485,8 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 		logp.Debug("mssql", "Response from unknown transaction. Ignoring.")
 		unmatchedResponses.Add(1)
 		return
-
 	}
-	// save json details
-	trans.mssql.Update(mapstr.M{
-		//"affected_rows": msg.affectedRows,
-	})
+
 	trans.isError = msg.isError
 	if trans.isError {
 		trans.mssql["error_code"] = msg.errorCode
@@ -461,19 +514,12 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans.path = msg.tables
 	trans.endTime = msg.ts
 
-	// save Raw message
-	if len(msg.raw) > 0 {
-		//fields, rows := mssql.parseMssqlResponse(msg.raw)
-
-		//trans.responseRaw = common.DumpInCSVFormat("", "")
-	}
-
 	trans.notes = append(trans.notes, msg.notes...)
 
 	mssql.publishTransaction(trans)
-	mssql.transactions.Delete(trans.tuple.Hashable())
-
 	logp.Debug("mssql", "Mssql transaction completed: %s %s %s", trans.query, trans.params, trans.mssql)
+
+	mssql.transactions.Delete(trans.tuple.Hashable())
 }
 
 func (mssql *mssqlPlugin) publishTransaction(t *mssqlTransaction) {
