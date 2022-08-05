@@ -19,6 +19,7 @@ package mssql
 
 import (
 	"encoding/binary"
+	"strconv"
 	"strings"
 	"time"
 
@@ -328,13 +329,11 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 	msgType := s.data[s.parseOffset]
 
 	switch msgType {
-	case 1:
+	case 0x01:
 		return parseQueryBatch(s)
-	case 4:
-		s.message.isRequest = false
-		s.message.size = 1
-		return true, true // response
-	case 18:
+	case 0x04:
+		return parseResponse(s)
+	case 0x12:
 		return parsePrelogin(s)
 	default:
 		logp.Debug("mssqldetailed", "MSSQL unknown message type = %d", msgType)
@@ -342,6 +341,21 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 		s.message.size = 1
 		return false, false
 	}
+}
+
+func parseResponse(s *mssqlStream) (bool, bool) {
+	s.message.isRequest = false
+	s.message.size = 1
+
+	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
+
+	if int(length) < len(s.data) {
+		return true, false
+	}
+
+	s.parseOffset += 8
+
+	return true, true
 }
 
 func parseQueryBatch(s *mssqlStream) (bool, bool) {
@@ -356,7 +370,7 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 	headerLen := binary.LittleEndian.Uint32(s.data[s.parseOffset+8:])
 	headerType := binary.LittleEndian.Uint16(s.data[s.parseOffset+16:])
 
-	if headerType != 2 {
+	if headerType != 0x02 {
 		return false, true // wrong header
 	}
 
@@ -379,6 +393,130 @@ func parsePrelogin(s *mssqlStream) (bool, bool) {
 	s.message.size = 1
 	s.message.ignoreMessage = true
 	return true, true
+}
+
+func parseQueryResponse(data []byte) ([]string, [][]string) {
+	var respFields []string
+	var respRows [][]string
+
+	offset := 0
+	length := len(data)
+
+	var nCols int
+
+	type Field struct {
+		name    string
+		lenSize int
+		varLen  bool
+		varType int // 1: int	2: string
+	}
+	var fields []Field
+
+	for {
+		tokenType := data[offset]
+		offset += 1
+
+		switch tokenType {
+		// colmetadata
+		case 0x81:
+			nMetaCols := binary.LittleEndian.Uint16(data[offset:])
+
+			nCols = int(nMetaCols)
+
+			offset += 2
+			for i := uint16(0); i < nMetaCols; i++ {
+				// todo: handle 16-bit userType
+				offset += 6
+				colType := data[offset]
+
+				var colLen, lenSize, varType int
+				var varLen bool
+				switch colType {
+				case 0xE7: // nvarchar
+					_ = int(binary.LittleEndian.Uint16(data[offset+1:]))
+					lenSize = 2
+					varType = 2
+					varLen = true
+					offset += 8 // skip collation
+
+				case 0x26: //intntype
+					colLen = int(data[offset+1])
+					if colLen <= 16 {
+						lenSize = 1
+					} else {
+						lenSize = 1
+					}
+					varType = 1
+					varLen = true
+					offset += 2
+
+				default:
+					varType = 1
+					varLen = false
+					lenSize = 4
+					offset += 1
+				}
+
+				colNameLen := data[offset]
+				colName := string(data[offset+1 : offset+1+int(colNameLen*2)])
+				fields = append(fields, Field{name: colName, lenSize: lenSize, varLen: varLen, varType: varType})
+				respFields = append(respFields, colName)
+				offset += len(colName) + 1
+			}
+
+		// row
+		case 0xD1:
+			var row []string
+			for i := 0; i < nCols; i++ {
+				var fieldSize uint32
+
+				if fields[i].varLen {
+					switch fields[i].lenSize {
+					case 4:
+						fieldSize = binary.LittleEndian.Uint32(data[offset:])
+					case 2:
+						fieldSize = uint32(binary.LittleEndian.Uint16(data[offset:]))
+					case 1:
+						fieldSize = uint32(data[offset])
+					}
+					offset += fields[i].lenSize
+				} else {
+					// fixed length
+					fieldSize = uint32(fields[i].lenSize)
+				}
+
+				var field string
+
+				switch fields[i].varType {
+				case 1: // int
+					switch fieldSize {
+					case 1:
+						field = strconv.Itoa(int(data[offset]))
+					case 2:
+						field = strconv.Itoa(int(binary.LittleEndian.Uint16(data[offset : offset+2])))
+					case 4:
+						field = strconv.Itoa(int(binary.LittleEndian.Uint32(data[offset : offset+4])))
+					case 8:
+						field = strconv.Itoa(int(binary.LittleEndian.Uint64(data[offset : offset+8])))
+					}
+				case 2: // string
+					field = string(data[offset : offset+int(fieldSize)])
+				}
+				offset += int(fieldSize)
+				row = append(row, field)
+			}
+			respRows = append(respRows, row)
+
+		default:
+			offset = int(length) // break
+		}
+
+		if offset >= int(length) {
+			break
+		}
+	}
+
+	return respFields, respRows
 }
 
 func getConnection(private protos.ProtocolData) *mssqlPrivateData {
