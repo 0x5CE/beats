@@ -360,6 +360,7 @@ func parseResponse(s *mssqlStream) (bool, bool) {
 
 func parseQueryBatch(s *mssqlStream) (bool, bool) {
 	s.message.isRequest = true
+	s.message.start = s.parseOffset
 
 	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
 
@@ -374,15 +375,18 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 		return false, true // wrong header
 	}
 
+	s.parseOffset += 8 + int(headerLen)
+
+	strRaw := s.data[uint32(s.parseOffset):length]
+
 	// MSSQL uses UTF16
 	decoder := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
-	query, _ := decoder.Bytes(s.data[uint32(s.parseOffset)+8+headerLen : length])
+	query, _ := decoder.Bytes(strRaw)
 
 	s.message.query = strings.Trim(string(query), " \r\n\t")
 
-	s.message.start = s.parseOffset
-	s.message.end += len(s.message.query)
-	s.message.end += 1 // type
+	s.parseOffset += len(strRaw)
+	s.message.end += s.parseOffset
 	s.message.size = uint64(s.message.end - s.message.start)
 
 	return true, true

@@ -81,7 +81,7 @@ func TestMssqlParser_16x_insertQuery(t *testing.T) {
 	if stream.message.query != "INSERT INTO Inventory VALUES (3, 'orangea', 111);" {
 		t.Error("Failed to parse query")
 	}
-	if stream.message.size != 50 {
+	if stream.message.size != 130 {
 		t.Errorf("Wrong message size %d", stream.message.size)
 	}
 }
