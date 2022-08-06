@@ -76,12 +76,59 @@ func TestMssqlParser_16x_insertQuery(t *testing.T) {
 		t.Error("Expecting a complete message")
 	}
 	if !stream.message.isRequest {
-		t.Error("Failed to parse postgres request")
+		t.Error("Failed to parse MSSQL request")
 	}
 	if stream.message.query != "INSERT INTO Inventory VALUES (3, 'orangea', 111);" {
 		t.Error("Failed to parse query")
 	}
 	if stream.message.size != 130 {
 		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+}
+
+func TestMssqlParser_16x_selectResponse(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+
+	data := []byte("0401006e003501008103000000000009002604026900640000" +
+		"0000000900e764000904d00034046e0061006d006500000000000900260408" +
+		"7100750061006e007400690074007900d104020000000c006f00720061006e" +
+		"0067006500049a000000fd1000c1000100000000000000")
+
+	message, err := hex.DecodeString(string(data))
+	if err != nil {
+		t.Error("Failed to decode hex string")
+	}
+
+	stream := &mssqlStream{data: message, message: new(mssqlMessage)}
+
+	ok, complete := mssql.mssqlMessageParser(stream)
+
+	if !ok {
+		t.Error("Parsing returned error")
+	}
+	if !complete {
+		t.Error("Expecting a complete message")
+	}
+	if stream.message.isRequest {
+		t.Error("Failed to parse MSSQL response")
+	}
+	if stream.message.size != 110 {
+		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+
+	// parse fields and rows
+	raw := stream.data[stream.message.start:stream.message.end]
+	if len(raw) == 0 {
+		t.Errorf("Empty raw data")
+	}
+	fields, rows := parseQueryResponse(raw)
+	if len(fields) != 3 {
+		t.Errorf("Wrong number of fields")
+	}
+	if len(rows) != 1 {
+		t.Errorf("Wrong number of rows")
+	}
+	if len(rows[0]) != 3 {
+		t.Errorf("Wrong number of columns")
 	}
 }

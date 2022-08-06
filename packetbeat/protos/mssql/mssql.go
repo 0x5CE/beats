@@ -345,7 +345,7 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 
 func parseResponse(s *mssqlStream) (bool, bool) {
 	s.message.isRequest = false
-	s.message.size = 1
+	s.message.start = s.parseOffset
 
 	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
 
@@ -353,8 +353,9 @@ func parseResponse(s *mssqlStream) (bool, bool) {
 		return true, false
 	}
 
-	s.parseOffset += 8
-
+	s.parseOffset = int(length)
+	s.message.end = s.parseOffset
+	s.message.size = uint64(s.message.end - s.message.start)
 	return true, true
 }
 
@@ -403,7 +404,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 	var respFields []string
 	var respRows [][]string
 
-	offset := 0
+	offset := 8 // skipping header
 	length := len(data)
 
 	var nCols int
@@ -610,7 +611,7 @@ func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
 	trans.notes = msg.notes
 
 	// save Raw message
-	trans.requestRaw = msg.query
+	trans.requestRaw = query
 	trans.bytesIn = msg.size
 }
 
@@ -655,6 +656,12 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans.bytesOut = msg.size
 	trans.path = msg.tables
 	trans.endTime = msg.ts
+
+	// dumping in CSV
+	if len(msg.raw) > 0 {
+		fields, rows := parseQueryResponse(msg.raw)
+		trans.responseRaw = common.DumpInCSVFormat(fields, rows)
+	}
 
 	trans.notes = append(trans.notes, msg.notes...)
 
