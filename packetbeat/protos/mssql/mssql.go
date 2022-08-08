@@ -526,11 +526,31 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				offset += len(colName) + 1
 			}
 
-		// row
-		case 0xD1:
+		// row, NBCRow (with some null values)
+		case 0xD1, 0xD2:
+
+			var nNullBitmap = int((len(fields)-1)/8) + 1
+			nullBitmap := make([]byte, nNullBitmap)
+
+			if tokenType == 0xD2 {
+				nullBitmap = data[offset : offset+nNullBitmap]
+				offset += nNullBitmap
+			} else {
+				for i := 0; i < len(nullBitmap); i++ {
+					nullBitmap[i] = 0x00
+				}
+			}
+
 			var row []string
 			for i := 0; i < nCols; i++ {
 				var fieldSize uint32
+				var field string
+
+				if getNullmapBit(nullBitmap, i) {
+					field = "NULL"
+					row = append(row, field)
+					continue
+				}
 
 				// ntexttype / texttype / text
 				if fields[i].colType == 0x63 || fields[i].colType == 0x23 {
@@ -553,8 +573,6 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 					// fixed length
 					fieldSize = uint32(fields[i].lenSize)
 				}
-
-				var field string
 
 				switch fields[i].colType {
 				case 0x26: // intntype
@@ -645,6 +663,12 @@ func datatimetypeToString(days, seconds int32) string {
 		":" + strconv.Itoa(time.Second())
 
 	return dateStr + " " + timeStr
+}
+
+func getNullmapBit(nullMap []byte, n int) bool {
+	index := n / 8
+	shift := n % 8
+	return (0x01 & (nullMap[index] >> shift)) == 0x01
 }
 
 func intNtoString(data []byte, fieldSize uint32) string {

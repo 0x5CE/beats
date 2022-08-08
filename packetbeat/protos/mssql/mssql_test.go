@@ -257,3 +257,69 @@ func TestMssqlParser_16x_typesResponse(t *testing.T) {
 		t.Errorf("Wrong datestamp value")
 	}
 }
+
+func TestMssqlParser_16x_nullColsResponse(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+
+	data := []byte("04010134003501008110000000000009" +
+		"00a701000904d0003401610000000000" +
+		"0900a701000904d00034016200000000" +
+		"000900a701000904d000340163000000" +
+		"00000900a701000904d0003401640000" +
+		"0000000900a701000904d00034016500" +
+		"000000000900a701000904d000340166" +
+		"00000000000900a701000904d0003401" +
+		"6700000000000900a701000904d00034" +
+		"016800000000000900a701000904d000" +
+		"34016900000000000900a701000904d0" +
+		"0034016a00000000000900a701000904" +
+		"d00034016b00000000000900a7010009" +
+		"04d00034016c00000000000900a70100" +
+		"0904d00034016d00000000000900a701" +
+		"000904d00034016e00000000000900a7" +
+		"01000904d00034016f00000000000900" +
+		"a701000904d00034017000d23eff0100" +
+		"41010047010048fd1000c10001000000" +
+		"00000000")
+
+	message, err := hex.DecodeString(string(data))
+	if err != nil {
+		t.Error("Failed to decode hex string")
+	}
+
+	stream := &mssqlStream{data: message, message: new(mssqlMessage)}
+
+	ok, complete := mssql.mssqlMessageParser(stream)
+
+	if !ok {
+		t.Error("Parsing returned error")
+	}
+	if !complete {
+		t.Error("Expecting a complete message")
+	}
+	if stream.message.isRequest {
+		t.Error("Failed to parse MSSQL response")
+	}
+	if stream.message.size != 308 {
+		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+
+	// parse fields and rows
+	raw := stream.data[stream.message.start:stream.message.end]
+	if len(raw) == 0 {
+		t.Errorf("Empty raw data")
+	}
+	fields, rows := parseQueryResponse(raw)
+	if len(fields) != 16 {
+		t.Errorf("Wrong number of fields")
+	}
+	if len(rows) != 1 {
+		t.Errorf("Wrong number of rows")
+	}
+	if len(rows[0]) != 16 {
+		t.Errorf("Wrong number of columns")
+	}
+	if rows[0][3] != "NULL" {
+		t.Errorf("Wrong column")
+	}
+}
