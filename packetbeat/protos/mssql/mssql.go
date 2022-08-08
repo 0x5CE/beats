@@ -55,6 +55,7 @@ type mssqlMessage struct {
 	errorInfo     string
 	query         string
 	ignoreMessage bool
+	login         bool
 	rowCount      uint64
 
 	direction    uint8
@@ -342,7 +343,6 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 		return parsePrelogin(s)
 	default:
 		logp.Debug("mssqldetailed", "MSSQL unknown message type = %d", msgType)
-		s.message.ignoreMessage = true
 		s.message.size = 1
 		return false, false
 	}
@@ -370,6 +370,10 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 		tokenType := s.data[offset]
 
 		switch tokenType {
+		case 00: // prelogin
+			s.message.ignoreMessage = true
+			offset = int(length) // break
+
 		case 0xE3: // envchange
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			changeType := s.data[offset+3]
@@ -388,6 +392,7 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 		case 0xAD: // loginAck
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			offset += int(tokenSize) + 3
+			s.message.login = true
 			mssql.version = s.data[offset-4]
 			mssql.versionMinor = s.data[offset-3]
 			logp.Debug("mssqldetailed", "loginack")
@@ -452,9 +457,18 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 func parsePrelogin(s *mssqlStream) (bool, bool) {
 	logp.Debug("mssqldetailed", "parse prelogin")
 
+	msgSize := binary.BigEndian.Uint16(s.data[2:])
+	if int(msgSize) != len(s.data) {
+		logp.Debug("mssqldetailed", "parseprelogin: Incomplete message")
+		return true, false
+	}
+
+	if s.data[8] == 0x16 { // ignore tls exchange
+		s.message.ignoreMessage = true
+	}
+
 	s.message.isRequest = s.isClient
 	s.message.size = 1
-	s.message.ignoreMessage = true
 	return true, true
 }
 
@@ -851,16 +865,8 @@ func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
 
 	trans.query = query
 	trans.method = method
-	trans.rowCount = msg.rowCount
 
-	if mssql.version != 0 || len(mssql.dbName) > 0 {
-		trans.mssql = mapstr.M{
-			"version": int(mssql.version),
-			"db_name": mssql.dbName,
-		}
-	} else {
-		trans.mssql = mapstr.M{}
-	}
+	trans.mssql = mapstr.M{}
 
 	trans.notes = msg.notes
 
@@ -910,6 +916,23 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans.bytesOut = msg.size
 	trans.endTime = msg.ts
 
+	trans.rowCount = msg.rowCount
+
+	if msg.login {
+		trans.query = "N/A"
+		trans.mssql = mapstr.M{
+			"message":       "Login successful",
+			"version":       int(mssql.version),
+			"minor_version": int(mssql.versionMinor),
+		}
+	} else if mssql.version != 0 || len(mssql.dbName) > 0 {
+		trans.mssql = mapstr.M{
+			"version": int(mssql.version),
+			"db_name": mssql.dbName,
+		}
+	} else {
+		trans.mssql = mapstr.M{}
+	}
 	// dumping in CSV
 	if len(msg.raw) > 0 {
 		fields, rows := parseQueryResponse(msg.raw)
