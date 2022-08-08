@@ -482,58 +482,8 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				var colLen, lenSize int
 				var varLen bool
+
 				switch colType {
-				case 0xE7: // nvarchartype
-					_ = int(binary.LittleEndian.Uint16(data[offset+1:]))
-					lenSize = 2
-					varLen = true
-					offset += 8 // skip collation
-
-				case 0x26: //intntype
-					colLen = int(data[offset+1])
-					if colLen <= 16 {
-						lenSize = 1
-					} else {
-						lenSize = 1
-					}
-					varLen = true
-					offset += 2
-
-				case 0x30: // int1type
-					varLen = false
-					lenSize = 1
-					offset += 1
-
-				case 0x3D: // datetimetype
-					varLen = false
-					lenSize = 8
-					offset += 1
-
-				case 0x6E: // moneyntype
-					varLen = true
-					lenSize = 1
-					offset += 2
-
-				case 0x3C: // moneytype
-					varLen = false
-					lenSize = 8
-					offset += 1
-
-				case 0x3B: // flt4type
-					varLen = false
-					lenSize = 4
-					offset += 1
-
-				case 0x3E: // flt8type
-					varLen = false
-					lenSize = 8
-					offset += 1
-
-				case 0x6D: // fltntype / float
-					varLen = true
-					lenSize = 1
-					offset += 2
-
 				// texttype / text
 				// ntexttype
 				case 0x63, 0x23:
@@ -551,6 +501,51 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 					varLen = true
 					offset += 8
 					lenSize = 2
+
+				// fltntype / float
+				// moneyntype
+				case 0x6E, 0x6D:
+					varLen = true
+					lenSize = 1
+					offset += 2
+
+				case 0xE7: // nvarchartype
+					_ = int(binary.LittleEndian.Uint16(data[offset+1:]))
+					lenSize = 2
+					varLen = true
+					offset += 8 // skip collation
+
+				case 0x26: //intntype
+					colLen = int(data[offset+1])
+					if colLen <= 16 {
+						lenSize = 1
+					} else {
+						lenSize = 1
+					}
+					varLen = true
+					offset += 2
+
+				// flt8type
+				// moneytype
+				case 0x3C, 0x3E:
+					varLen = false
+					lenSize = 8
+					offset += 1
+
+				case 0x3B: // flt4type
+					varLen = false
+					lenSize = 4
+					offset += 1
+
+				case 0x30: // int1type
+					varLen = false
+					lenSize = 1
+					offset += 1
+
+				case 0x3D: // datetimetype
+					varLen = false
+					lenSize = 8
+					offset += 1
 
 				case 0x6C: // numerictype / numeric
 					varLen = true
