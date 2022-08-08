@@ -490,6 +490,29 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 					lenSize = 1
 					offset += 2
 
+				// texttype / text
+				// ntexttype
+				case 0x63, 0x23:
+					varLen = true
+					_ = int(binary.LittleEndian.Uint32(data[offset+1:]))
+					offset += 10 // skip colation
+					tableLen := binary.LittleEndian.Uint16(data[offset+1:])
+					offset += 3 + (int(tableLen) * 2) // skip table name
+					lenSize = 4
+
+				// nchartype / nchar
+				// bigvarchartype / varchar
+				// bigchartype / char
+				case 0xEF, 0xA7, 0xAF:
+					varLen = true
+					offset += 8
+					lenSize = 2
+
+				case 0x6C: // numerictype / numeric
+					varLen = true
+					offset += 4
+					lenSize = 1
+
 				default:
 					varLen = false
 					lenSize = 4
@@ -508,6 +531,13 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 			var row []string
 			for i := 0; i < nCols; i++ {
 				var fieldSize uint32
+
+				// ntexttype / texttype / text
+				if fields[i].colType == 0x63 || fields[i].colType == 0x23 {
+					tpLen := data[offset]
+					// skipping timestamp and textptr
+					offset += int(tpLen) + 9
+				}
 
 				if fields[i].varLen {
 					switch fields[i].lenSize {
@@ -528,21 +558,30 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				switch fields[i].colType {
 				case 0x26: // intntype
-					switch fieldSize {
-					case 1:
-						field = strconv.Itoa(int(data[offset]))
-					case 2:
-						field = strconv.Itoa(int(binary.LittleEndian.Uint16(data[offset : offset+2])))
-					case 4:
-						field = strconv.Itoa(int(binary.LittleEndian.Uint32(data[offset : offset+4])))
-					case 8:
-						field = strconv.Itoa(int(binary.LittleEndian.Uint64(data[offset : offset+8])))
+					field = intNtoString(data[offset:], fieldSize)
+
+				case 0x6C: // numerictype / numeric
+					fs := fieldSize - 1
+					sign := data[offset]
+					field = intNtoString(data[offset+1:], fs)
+					if sign == 0x01 {
+						field = "-" + field
 					}
 
 				case 0x30: // int1type
 					field = strconv.Itoa(int(data[offset]))
 
-				case 0xE7: // nvarchartype
+				// texttype / text
+				// bigvarchartype / varchar
+				// bigchartype / char
+				case 0xAF, 0xA7, 0x23:
+					field = string(data[offset : offset+int(fieldSize)])
+
+				// ntexttype
+				// nvarchartype
+				// nchartype
+				case 0x63, 0xEF, 0xE7:
+					// todo: two byte char
 					field = string(data[offset : offset+int(fieldSize)])
 
 				case 0x3D: // datetimetype
@@ -606,6 +645,22 @@ func datatimetypeToString(days, seconds int32) string {
 		":" + strconv.Itoa(time.Second())
 
 	return dateStr + " " + timeStr
+}
+
+func intNtoString(data []byte, fieldSize uint32) string {
+	offset := 0
+	var field string
+	switch fieldSize {
+	case 1:
+		field = strconv.Itoa(int(data[offset]))
+	case 2:
+		field = strconv.Itoa(int(binary.LittleEndian.Uint16(data[offset : offset+2])))
+	case 4:
+		field = strconv.Itoa(int(binary.LittleEndian.Uint32(data[offset : offset+4])))
+	case 8:
+		field = strconv.Itoa(int(binary.LittleEndian.Uint64(data[offset : offset+8])))
+	}
+	return field
 }
 
 func moneytype8ToString(data []byte) string {
