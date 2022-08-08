@@ -1,0 +1,158 @@
+#################### Packetbeat Configuration Template #########################
+
+# Select the network interfaces to sniff the data. You can use the "any"
+# keyword to sniff on all connected interfaces. On all platforms, you
+# can use "default_route", "default_route_ipv4" or "default_route_ipv6"
+# to sniff on the device carrying the default route.
+packetbeat.interfaces.device: any
+packetbeat.interfaces.internal_networks:
+  - private
+
+
+
+
+
+
+
+packetbeat.protocols:
+# Configure which protocols to monitor and the ports where they are
+# running. You can disable a given protocol by commenting out its
+# configuration.
+- type: icmp
+  enabled: true
+
+
+
+- type: dhcpv4
+  ports: [67, 68]
+
+- type: dns
+  ports: [53]
+
+
+
+
+
+- type: amqp
+  ports: [5672]
+
+
+
+- type: cassandra
+  ports: [9042]
+
+
+
+
+
+
+
+- type: http
+  ports: [80]
+
+
+
+
+
+
+
+
+- type: memcache
+  ports: [11211]
+
+
+
+
+
+
+
+- type: mssql
+  ports: [1433]
+
+
+
+
+
+
+- type: mysql
+  ports: [3306]
+
+
+
+
+
+- type: pgsql
+  ports: [5432]
+
+
+
+
+
+- type: redis
+  ports: [6379]
+
+
+
+- type: nfs
+  ports: [2049]
+
+- type: thrift
+  ports: [9090]
+  transport_type: "socket"
+
+
+
+
+- type: tls
+  ports: [443]
+
+
+
+
+
+- type: mongodb
+  ports: [27017]
+
+
+  max_docs:
+  max_doc_length:
+
+- type: sip
+  ports: [5060]
+  transport_protocol:
+
+
+
+
+#================================ General =====================================
+
+# The name of the shipper that publishes the network data. It can be used to group
+# all the transactions sent by a single shipper in the web interface.
+# If this options is not defined, the hostname is used.
+name:
+
+# The tags of the shipper are included in their own field with each
+# transaction published. Tags make it easy to group servers by different
+# logical properties.
+tags: []
+
+packetbeat.shutdown_timeout: 400ms
+
+#================================ Queue =====================================
+
+queue.mem:
+  events: 4096
+  flush.min_events: 8
+  flush.timeout: 0.1s
+
+#================================ Outputs =====================================
+
+# Configure what outputs to use when sending the data collected by the beat.
+# Multiple outputs may be used.
+#------------------------------- File output ----------------------------------
+output.file:
+  path: /home/muazzam/devtest/fs/beats/packetbeat/tests/me/output
+  filename: "packetbeat"
+  rotate_every_kb: 1000
+  #number_of_files: 7
+

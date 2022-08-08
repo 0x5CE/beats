@@ -50,12 +50,12 @@ type mssqlMessage struct {
 	ts            time.Time
 	isRequest     bool
 	size          uint64
-	tables        string
 	isError       bool
 	errorCode     uint16
 	errorInfo     string
 	query         string
 	ignoreMessage bool
+	rowCount      uint64
 
 	direction    uint8
 	tcpTuple     common.TCPTuple
@@ -75,9 +75,9 @@ type mssqlTransaction struct {
 	endTime  time.Time
 	query    string
 	method   string
-	path     string // for mssql, Path refers to the mssql table queried
 	bytesOut uint64
 	bytesIn  uint64
+	rowCount uint64
 	notes    []string
 	isError  bool
 
@@ -85,8 +85,6 @@ type mssqlTransaction struct {
 
 	requestRaw  string
 	responseRaw string
-
-	params []string // for execute statement param
 }
 
 type mssqlStream struct {
@@ -130,6 +128,11 @@ type mssqlPlugin struct {
 
 	transactions       *common.Cache
 	transactionTimeout time.Duration
+
+	// state
+	version      byte
+	versionMinor byte
+	dbName       string
 
 	// prepare statements cache
 	prepareStatements       *common.Cache
@@ -334,7 +337,7 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 	case 0x01:
 		return parseQueryBatch(s)
 	case 0x04:
-		return parseResponse(s)
+		return mssql.parseResponse(s)
 	case 0x12:
 		return parsePrelogin(s)
 	default:
@@ -345,7 +348,7 @@ func (mssql *mssqlPlugin) mssqlMessageParser(s *mssqlStream) (bool, bool) {
 	}
 }
 
-func parseResponse(s *mssqlStream) (bool, bool) {
+func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 	s.message.isRequest = false
 	s.message.start = s.parseOffset
 
@@ -358,6 +361,47 @@ func parseResponse(s *mssqlStream) (bool, bool) {
 	s.parseOffset = int(length)
 	s.message.end = s.parseOffset
 	s.message.size = uint64(s.message.end - s.message.start)
+
+	offset := 8
+	for {
+		tokenType := s.data[offset]
+
+		switch tokenType {
+		case 0xE3: // envchange
+			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
+			changeType := s.data[offset+3]
+			if changeType == 0x01 { // database changed
+				nameLen := s.data[offset+4]
+				name := string(s.data[offset+5 : offset+5+int(nameLen*2)])
+				mssql.dbName = name
+			}
+			offset += int(tokenSize) + 3
+
+		case 0xAB: // info
+			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
+			offset += int(tokenSize) + 3
+
+		case 0xAD: // loginAck
+			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
+			offset += int(tokenSize) + 3
+			mssql.version = s.data[offset-4]
+			mssql.versionMinor = s.data[offset-3]
+
+		default:
+			offset = int(length) // break
+		}
+
+		if offset >= int(length) {
+			break
+		}
+	}
+
+	// parse done token
+	offset = int(length) - 13
+	if s.data[offset] == 0xFD {
+		s.message.rowCount = binary.LittleEndian.Uint64(s.data[offset+5:])
+	}
+
 	return true, true
 }
 
@@ -528,7 +572,6 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 		// row, NBCRow (with some null values)
 		case 0xD1, 0xD2:
-
 			var nNullBitmap = int((len(fields)-1)/8) + 1
 			nullBitmap := make([]byte, nNullBitmap)
 
@@ -789,8 +832,16 @@ func (mssql *mssqlPlugin) receivedMssqlRequest(msg *mssqlMessage) {
 
 	trans.query = query
 	trans.method = method
+	trans.rowCount = msg.rowCount
 
-	trans.mssql = mapstr.M{}
+	if mssql.version != 0 || len(mssql.dbName) > 0 {
+		trans.mssql = mapstr.M{
+			"version": int(mssql.version),
+			"db_name": mssql.dbName,
+		}
+	} else {
+		trans.mssql = mapstr.M{}
+	}
 
 	trans.notes = msg.notes
 
@@ -838,7 +889,6 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	}
 
 	trans.bytesOut = msg.size
-	trans.path = msg.tables
 	trans.endTime = msg.ts
 
 	// dumping in CSV
@@ -850,7 +900,7 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans.notes = append(trans.notes, msg.notes...)
 
 	mssql.publishTransaction(trans)
-	logp.Debug("mssql", "Mssql transaction completed: %s %s %s", trans.query, trans.params, trans.mssql)
+	logp.Debug("mssql", "Mssql transaction completed: %s %s", trans.query, trans.mssql)
 
 	mssql.transactions.Delete(trans.tuple.Hashable())
 }
@@ -881,12 +931,7 @@ func (mssql *mssqlPlugin) publishTransaction(t *mssqlTransaction) {
 	fields["method"] = t.method
 	fields["query"] = t.query
 	fields["mssql"] = t.mssql
-	if len(t.path) > 0 {
-		fields["path"] = t.path
-	}
-	if len(t.params) > 0 {
-		fields["params"] = t.params
-	}
+	fields["row_count"] = t.rowCount
 
 	if t.isError {
 		fields["status"] = common.ERROR_STATUS
