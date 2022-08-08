@@ -354,7 +354,10 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 
 	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
 
+	logp.Debug("mssqldetailed", "Parsing response")
+
 	if int(length) < len(s.data) {
+		logp.Debug("mssqldetailed", "parseresponse: Incomplete message")
 		return true, false
 	}
 
@@ -372,20 +375,22 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 			changeType := s.data[offset+3]
 			if changeType == 0x01 { // database changed
 				nameLen := s.data[offset+4]
-				name := string(s.data[offset+5 : offset+5+int(nameLen*2)])
-				mssql.dbName = name
+				mssql.dbName = utf16ToUtf8(s.data[offset+5 : offset+5+int(nameLen*2)])
 			}
 			offset += int(tokenSize) + 3
+			logp.Debug("mssqldetailed", "envchange")
 
 		case 0xAB: // info
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			offset += int(tokenSize) + 3
+			logp.Debug("mssqldetailed", "info token")
 
 		case 0xAD: // loginAck
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			offset += int(tokenSize) + 3
 			mssql.version = s.data[offset-4]
 			mssql.versionMinor = s.data[offset-3]
+			logp.Debug("mssqldetailed", "loginack")
 
 		default:
 			offset = int(length) // break
@@ -400,6 +405,7 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 	offset = int(length) - 13
 	if s.data[offset] == 0xFD {
 		s.message.rowCount = binary.LittleEndian.Uint64(s.data[offset+5:])
+		logp.Debug("mssqldetailed", "Row count %d", s.message.rowCount)
 	}
 
 	return true, true
@@ -411,7 +417,10 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 
 	length := binary.BigEndian.Uint16(s.data[s.parseOffset+2:])
 
+	logp.Debug("mssqldetailed", "parsequerybatch")
+
 	if int(length) < len(s.data) {
+		logp.Debug("mssqldetailed", "parsequerybatch: Incomplete message")
 		return true, false
 	}
 
@@ -419,18 +428,19 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 	headerType := binary.LittleEndian.Uint16(s.data[s.parseOffset+16:])
 
 	if headerType != 0x02 {
+		logp.Warn("mssqldetailed", "wrong header: %x", headerType)
 		return false, true // wrong header
 	}
 
 	s.parseOffset += 8 + int(headerLen)
 
-	strRaw := s.data[uint32(s.parseOffset):length]
-
 	// MSSQL uses UTF16
-	decoder := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
-	query, _ := decoder.Bytes(strRaw)
+	strRaw := s.data[uint32(s.parseOffset):length]
+	query := utf16ToUtf8(strRaw)
 
 	s.message.query = strings.Trim(string(query), " \r\n\t")
+
+	logp.Debug("mssqldetailed", "parse query: %s", s.message.query)
 
 	s.parseOffset += len(strRaw)
 	s.message.end += s.parseOffset
@@ -440,6 +450,8 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 }
 
 func parsePrelogin(s *mssqlStream) (bool, bool) {
+	logp.Debug("mssqldetailed", "parse prelogin")
+
 	s.message.isRequest = s.isClient
 	s.message.size = 1
 	s.message.ignoreMessage = true
@@ -559,10 +571,14 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				}
 
 				colNameLen := data[offset]
-				colName := string(data[offset+1 : offset+1+int(colNameLen*2)])
+				strRaw := data[offset+1 : offset+1+int(colNameLen*2)]
+				colName := utf16ToUtf8(strRaw)
+
+				logp.Debug("mssqldetailed", "parse col", colName, colType)
+
 				fields = append(fields, Field{name: colName, lenSize: lenSize, varLen: varLen, colType: colType})
 				respFields = append(respFields, colName)
-				offset += len(colName) + 1
+				offset += len(strRaw) + 1
 			}
 
 		// row, NBCRow (with some null values)
@@ -586,6 +602,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				if getNullmapBit(nullBitmap, i) {
 					field = "NULL"
+					logp.Debug("mssqldetailed", "parse null")
 					row = append(row, field)
 					continue
 				}
@@ -637,8 +654,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				// nvarchartype
 				// nchartype
 				case 0x63, 0xEF, 0xE7:
-					// todo: two byte char
-					field = string(data[offset : offset+int(fieldSize)])
+					field = utf16ToUtf8(data[offset : offset+int(fieldSize)])
 
 				case 0x3D: // datetimetype
 					days := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
@@ -676,7 +692,9 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				}
 				offset += int(fieldSize)
 				row = append(row, field)
+				logp.Debug("mssqldetailed", "parse row %s", field)
 			}
+
 			respRows = append(respRows, row)
 
 		default:
@@ -689,6 +707,12 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 	}
 
 	return respFields, respRows
+}
+
+func utf16ToUtf8(raw []byte) string {
+	decoder := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()
+	str, _ := decoder.Bytes(raw)
+	return string(str)
 }
 
 func datatimetypeToString(days, seconds int32) string {
