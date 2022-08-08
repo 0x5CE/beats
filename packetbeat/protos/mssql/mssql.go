@@ -19,6 +19,8 @@ package mssql
 
 import (
 	"encoding/binary"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -413,7 +415,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 		name    string
 		lenSize int
 		varLen  bool
-		varType int // 1: int	2: string
+		colType byte
 	}
 	var fields []Field
 
@@ -434,13 +436,12 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				offset += 6
 				colType := data[offset]
 
-				var colLen, lenSize, varType int
+				var colLen, lenSize int
 				var varLen bool
 				switch colType {
-				case 0xE7: // nvarchar
+				case 0xE7: // nvarchartype
 					_ = int(binary.LittleEndian.Uint16(data[offset+1:]))
 					lenSize = 2
-					varType = 2
 					varLen = true
 					offset += 8 // skip collation
 
@@ -451,12 +452,45 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 					} else {
 						lenSize = 1
 					}
-					varType = 1
 					varLen = true
 					offset += 2
 
+				case 0x30: // int1type
+					varLen = false
+					lenSize = 1
+					offset += 1
+
+				case 0x3D: // datetimetype
+					varLen = false
+					lenSize = 8
+					offset += 1
+
+				case 0x6E: // moneyntype
+					varLen = true
+					lenSize = 1
+					offset += 2
+
+				case 0x3C: // moneytype
+					varLen = false
+					lenSize = 8
+					offset += 1
+
+				case 0x3B: // flt4type
+					varLen = false
+					lenSize = 4
+					offset += 1
+
+				case 0x3E: // flt8type
+					varLen = false
+					lenSize = 8
+					offset += 1
+
+				case 0x6D: // fltntype / float
+					varLen = true
+					lenSize = 1
+					offset += 2
+
 				default:
-					varType = 1
 					varLen = false
 					lenSize = 4
 					offset += 1
@@ -464,7 +498,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				colNameLen := data[offset]
 				colName := string(data[offset+1 : offset+1+int(colNameLen*2)])
-				fields = append(fields, Field{name: colName, lenSize: lenSize, varLen: varLen, varType: varType})
+				fields = append(fields, Field{name: colName, lenSize: lenSize, varLen: varLen, colType: colType})
 				respFields = append(respFields, colName)
 				offset += len(colName) + 1
 			}
@@ -492,8 +526,8 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				var field string
 
-				switch fields[i].varType {
-				case 1: // int
+				switch fields[i].colType {
+				case 0x26: // intntype
 					switch fieldSize {
 					case 1:
 						field = strconv.Itoa(int(data[offset]))
@@ -504,8 +538,46 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 					case 8:
 						field = strconv.Itoa(int(binary.LittleEndian.Uint64(data[offset : offset+8])))
 					}
-				case 2: // string
+
+				case 0x30: // int1type
+					field = strconv.Itoa(int(data[offset]))
+
+				case 0xE7: // nvarchartype
 					field = string(data[offset : offset+int(fieldSize)])
+
+				case 0x3D: // datetimetype
+					days := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
+					seconds := int32(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+					field = datatimetypeToString(days, seconds)
+
+				case 0x6E: // moneyntype
+					switch fieldSize {
+					case 4:
+						field = moneytype4ToString(data)
+					case 8:
+						field = moneytype8ToString(data)
+					}
+
+				case 0x3C: // moneytype
+					field = moneytype8ToString(data)
+
+				case 0x3B: // flt4type
+					num := math.Float32frombits(binary.LittleEndian.Uint32(data[offset:]))
+					field = fmt.Sprintf("%f", num)
+
+				case 0x3E: // flt8type
+					num := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
+					field = fmt.Sprintf("%f", num)
+
+				case 0x6D: // fltntype / float
+					switch fieldSize {
+					case 4:
+						num := math.Float32frombits(binary.LittleEndian.Uint32(data[offset:]))
+						field = fmt.Sprintf("%f", num)
+					case 8:
+						num := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
+						field = fmt.Sprintf("%f", num)
+					}
 				}
 				offset += int(fieldSize)
 				row = append(row, field)
@@ -522,6 +594,39 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 	}
 
 	return respFields, respRows
+}
+
+func datatimetypeToString(days, seconds int32) string {
+	time := time.Unix(-2208988800+int64((int(days)*24*60*60)),
+		1000000000*int64(-5*60*60+(seconds/300)))
+
+	dateStr := strconv.Itoa(time.Day()) + "/" + strconv.Itoa(int(time.Month())) +
+		"/" + strconv.Itoa(time.Year())
+	timeStr := strconv.Itoa(time.Hour()) + ":" + strconv.Itoa(time.Minute()) +
+		":" + strconv.Itoa(time.Second())
+
+	return dateStr + " " + timeStr
+}
+
+func moneytype8ToString(data []byte) string {
+	mostSig := int32(binary.LittleEndian.Uint32(data[0:4]))
+	leastSig := int32(binary.LittleEndian.Uint32(data[4:8]))
+
+	total := (int64(math.Pow(2, 32))*int64(mostSig) + int64(leastSig))
+
+	amount := total / 10000
+	dec := total % 10000
+
+	return fmt.Sprintf("%d.%02d", amount, dec)
+}
+
+func moneytype4ToString(data []byte) string {
+	total := int64(int32(binary.LittleEndian.Uint32(data[4:8])))
+
+	amount := total / 10000
+	dec := total % 10000
+
+	return fmt.Sprintf("%d.%02d", amount, dec)
 }
 
 func getConnection(private protos.ProtocolData) *mssqlPrivateData {

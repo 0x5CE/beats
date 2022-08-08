@@ -132,3 +132,54 @@ func TestMssqlParser_16x_selectResponse(t *testing.T) {
 		t.Errorf("Wrong number of columns")
 	}
 }
+
+func TestMssqlParser_16x_datetimeResponse(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+
+	data := []byte("04010049003501008102000000000009" +
+		"00260402690064000000000008003d07" +
+		"6300720065006100740065006400d104" +
+		"20000000eaae0000a2745901fd1000c1" +
+		"000100000000000000")
+
+	message, err := hex.DecodeString(string(data))
+	if err != nil {
+		t.Error("Failed to decode hex string")
+	}
+
+	stream := &mssqlStream{data: message, message: new(mssqlMessage)}
+
+	ok, complete := mssql.mssqlMessageParser(stream)
+
+	if !ok {
+		t.Error("Parsing returned error")
+	}
+	if !complete {
+		t.Error("Expecting a complete message")
+	}
+	if stream.message.isRequest {
+		t.Error("Failed to parse MSSQL response")
+	}
+	if stream.message.size != 73 {
+		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+
+	// parse fields and rows
+	raw := stream.data[stream.message.start:stream.message.end]
+	if len(raw) == 0 {
+		t.Errorf("Empty raw data")
+	}
+	fields, rows := parseQueryResponse(raw)
+	if len(fields) != 2 {
+		t.Errorf("Wrong number of fields")
+	}
+	if len(rows) != 1 {
+		t.Errorf("Wrong number of rows")
+	}
+	if len(rows[0]) != 2 {
+		t.Errorf("Wrong number of columns")
+	}
+	if rows[0][1] != "7/8/2022 20:57:45" {
+		t.Errorf("Wrong datestamp value")
+	}
+}
