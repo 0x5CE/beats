@@ -51,7 +51,7 @@ type mssqlMessage struct {
 	isRequest     bool
 	size          uint64
 	isError       bool
-	errorCode     uint16
+	errorCode     uint32
 	errorInfo     string
 	query         string
 	ignoreMessage bool
@@ -396,6 +396,16 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 			mssql.versionMinor = s.data[offset-3]
 			logp.Debug("mssqldetailed", "loginack")
 
+		case 0xAA: // error
+			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
+
+			s.message.errorCode = binary.LittleEndian.Uint32(s.data[offset+3:])
+			msgLen := binary.LittleEndian.Uint16(s.data[offset+9:])
+			s.message.errorInfo = utf16ToUtf8(s.data[offset+11 : offset+11+int(msgLen*2)])
+
+			offset += int(tokenSize) + 3
+			logp.Debug("mssqldetailed", "error %X", s.message.errorCode)
+
 		default:
 			offset = int(length) // break
 		}
@@ -405,9 +415,18 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 		}
 	}
 
-	// parse done token
+	// done / doneproc token
 	offset = int(length) - 13
-	if s.data[offset] == 0xFD {
+	if s.data[offset] == 0xFD || s.data[offset] == 0xFE {
+		flags := uint64(binary.LittleEndian.Uint16(s.data[offset+1:]))
+		if s.message.errorCode == 0 {
+			if flags&0x0002 == 1 {
+				logp.Debug("mssqldetailed", "done token error")
+
+			} else if flags&0x0100 == 1 {
+				logp.Debug("mssqldetailed", "done token server error")
+			}
+		}
 		s.message.rowCount = binary.LittleEndian.Uint64(s.data[offset+5:])
 		logp.Debug("mssqldetailed", "Row count %d", s.message.rowCount)
 	}
