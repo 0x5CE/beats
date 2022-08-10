@@ -22,6 +22,9 @@ packetbeat.protocols.mysql:
 packetbeat.protocols.pgsql:
   ports: [5432]
 
+packetbeat.protocols.mssql:
+  ports: [1433]
+
 packetbeat.protocols.redis:
   ports: [6379]
 

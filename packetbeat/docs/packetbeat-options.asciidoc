@@ -499,6 +499,9 @@ packetbeat.protocols:
 - type: mysql
   ports: [3306,3307]
 
+- type: mssql
+  ports: [1433]
+
 - type: redis
   ports: [6379]
 
@@ -1054,6 +1057,45 @@ default is 10 rows.
 
 The maximum length in bytes of a row from the SQL message to publish to
 Elasticsearch. The default is 1024 bytes.
+
+[[packetbeat-mssql-options]]
+=== Capture MSSQL traffic
+
+++++
+<titleabbrev>MSSQL</titleabbrev>
+++++
+
+The `mssql` section of the +{beatname_lc}.yml+ config file specifies configuration
+options for the MSSQL protocols.
+
+[source,yaml]
+------------------------------------------------------------------------------
+packetbeat.protocols:
+
+- type: mssql
+  ports: [1433]
+------------------------------------------------------------------------------
+
+==== Configuration options
+
+Also see <<common-protocol-options>>.
+
+===== `max_rows`
+
+The maximum number of rows from the SQL message to publish to Elasticsearch. The
+default is 10 rows.
+
+
+===== `max_row_length`
+
+The maximum length in bytes of a row from the SQL message to publish to
+Elasticsearch. The default is 1024 bytes.
+
+==== `statement_timeout`
+
+The duration for which prepared statements are cached after their last use.
+Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+The default is `1h`.
 
 [[configuration-thrift]]
 === Capture Thrift traffic

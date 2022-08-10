@@ -77,6 +77,11 @@ packetbeat.protocols:
   # the MySQL protocol by commenting out the list of ports.
   ports: [3306,3307]
 
+- type: mssql
+  # Configure the ports where to listen for MSSQL traffic. You can disable
+  # the MSSQL protocol by commenting out the list of ports.
+  ports: [1433]
+
 - type: pgsql
   # Configure the ports where to listen for Pgsql traffic. You can disable
   # the Pgsql protocol by commenting out the list of ports.

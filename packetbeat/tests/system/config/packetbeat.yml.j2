@@ -118,6 +118,13 @@ packetbeat.protocols:
 {% if pgsql_send_request %}  send_request: true{%- endif %}
 {% if pgsql_send_response %}  send_response: true{%- endif %}
 
+- type: mssql
+  ports: [{{ mssql_ports|default([1433])|join(", ") }}]
+{% if mssql_max_rows %}  max_rows: {{mssql_max_rows}}{%- endif %}
+{% if mssql_max_row_length %}  max_row_length: {{mssql_max_row_length}}{%- endif %}
+{% if mssql_send_request %}  send_request: true{%- endif %}
+{% if mssql_send_response %}  send_response: true{%- endif %}
+
 - type: redis
   ports: [{{ redis_ports|default([6379])|join(", ") }}]
 {% if redis_send_request %}  send_request: true{% endif %}

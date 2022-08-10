@@ -12,6 +12,7 @@
  - Cassandra
  - Mysql
  - PostgreSQL
+ - MSSQL
  - Redis
  - Thrift-RPC
  - MongoDB

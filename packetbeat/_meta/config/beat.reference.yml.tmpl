@@ -394,6 +394,32 @@ packetbeat.protocols:
   # Overrides where this protocol's events are indexed.
   #index: my-custom-pgsql-index
 
+- type: mssql
+  # Enable mssql monitoring. Default: true
+  #enabled: true
+
+  # Configure the ports where to listen for MSSQL traffic. You can disable
+  # the MSSQL protocol by commenting out the list of ports.
+  ports: [1433]
+
+  # If this option is enabled, the raw message of the request (`request` field)
+  # is sent to Elasticsearch. The default is false.
+  #send_request: false
+
+  # If this option is enabled, the raw message of the response (`response`
+  # field) is sent to Elasticsearch. The default is false.
+  #send_response: false
+
+  # Set to true to publish fields with null values in events.
+  #keep_null: false
+
+  # Transaction timeout. Expired transactions will no longer be correlated to
+  # incoming responses, but sent to Elasticsearch immediately.
+  #transaction_timeout: 10s
+
+  # Overrides where this protocol's events are indexed.
+  #index: my-custom-mssql-index
+  
 - type: redis
   # Enable redis monitoring. Default: true
   #enabled: true

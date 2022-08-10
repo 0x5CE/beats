@@ -82,6 +82,11 @@ packetbeat.protocols:
   # the Pgsql protocol by commenting out the list of ports.
   ports: [5432]
 
+- type: mssql
+  # Configure the ports where to listen for MSSQL traffic. You can disable
+  # the MSSQL protocol by commenting out the list of ports.
+  ports: [1433]
+
 - type: redis
   # Configure the ports where to listen for Redis traffic. You can disable
   # the Redis protocol by commenting out the list of ports.
