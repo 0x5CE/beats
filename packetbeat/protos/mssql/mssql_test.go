@@ -23,9 +23,13 @@ package mssql
 import (
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
 	"github.com/elastic/beats/v7/packetbeat/procs"
+	"github.com/elastic/beats/v7/packetbeat/protos"
+	"github.com/elastic/beats/v7/packetbeat/protos/tcp"
 	"github.com/elastic/beats/v7/packetbeat/publish"
 )
 
@@ -321,5 +325,240 @@ func TestMssqlParser_16x_nullColsResponse(t *testing.T) {
 	}
 	if rows[0][3] != "NULL" {
 		t.Errorf("Wrong column")
+	}
+}
+
+func TestMssql_16x_Login(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+	// prelogin
+	data, err := hex.DecodeString("120100580000010000001f0006010025" +
+		"00010200260001030027000404002b00" +
+		"0105002c0024ff110a00010000000000" +
+		"000000006a0a32e033511c10425ad9ce" +
+		"a26b69c8096d9dac950af77ac1618566" +
+		"f269c6e800000000")
+	if err != nil {
+		t.Errorf("Failed to decode string")
+	}
+	ts, err := time.Parse(time.RFC3339, "2000-12-26T01:15:06+04:20")
+	if err != nil {
+		t.Errorf("Failed to get ts")
+	}
+	pkt := protos.Packet{
+		Payload: data,
+		Ts:      ts,
+	}
+	var tuple common.TCPTuple
+	var private mssqlPrivateData
+
+	var loggedIn bool
+	countHandleMssql := 0
+
+	mssql.handleMssql = func(mssql *mssqlPlugin, m *mssqlMessage, tcp *common.TCPTuple,
+		dir uint8, raw_msg []byte,
+	) {
+		if m.login {
+			loggedIn = true
+		}
+		countHandleMssql++
+	}
+	mssql.Parse(&pkt, &tuple, tcp.TCPDirectionOriginal, private)
+
+	// server response
+	data, err = hex.DecodeString("040101b900350100e31b0001066d0061" +
+		"007300740065007200066d0061007300" + "740065007200ab600045160000020025" +
+		"004300680061006e0067006500640020" + "00640061007400610062006100730065" +
+		"00200063006f006e0074006500780074" + "00200074006f00200027006d00610073" +
+		"0074006500720027002e000473007100" + "6c0031000001000000e3080007050904" +
+		"d0003400e31700020a750073005f0065" + "006e0067006c0069007300680000ab64" +
+		"0047160000010027004300680061006e" + "0067006500640020006c0061006e0067" +
+		"00750061006700650020007300650074" + "00740069006e006700200074006f0020" +
+		"00750073005f0065006e0067006c0069" + "00730068002e0004730071006c003100" +
+		"0001000000ad36000174000004164d00" + "6900630072006f0073006f0066007400" +
+		"2000530051004c002000530065007200" + "7600650072000000000010000258e313" +
+		"00040434003000390036000434003000" + "39003600ae0b01000000000902000000" +
+		"01010a0100000001012e000000000900" + "608114ffe7ffff000202070104010005" +
+		"04ffffffff0601000701020808000000" + "00000000000904fffffffffffd000000" +
+		"000000000000000000")
+	if err != nil {
+		t.Errorf("Failed to decode string")
+	}
+	pkt = protos.Packet{
+		Payload: data,
+		Ts:      ts,
+	}
+	mssql.Parse(&pkt, &tuple, tcp.TCPDirectionOriginal, private)
+
+	if !loggedIn {
+		t.Errorf("mssql login failed")
+	}
+
+	if mssql.version != 16 {
+		t.Errorf("mssql login wrong version")
+	}
+
+	if countHandleMssql != 2 {
+		t.Errorf("handleMssql not called")
+	}
+}
+
+func TestMssqlParser_15x_query(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+
+	data := []byte(
+		"0101004a000001001600000012000000" +
+			"02000000000000000000010000005300" +
+			"45004c0045004300540020002a002000" +
+			"460052004f004d0020006d006f007600" +
+			"69006500730031000a00")
+
+	message, err := hex.DecodeString(string(data))
+	if err != nil {
+		t.Error("Failed to decode hex string")
+	}
+
+	stream := &mssqlStream{data: message, message: new(mssqlMessage)}
+
+	ok, complete := mssql.mssqlMessageParser(stream)
+
+	if !ok {
+		t.Error("Parsing returned error")
+	}
+	if !complete {
+		t.Error("Expecting a complete message")
+	}
+	if !stream.message.isRequest {
+		t.Error("Failed to parse MSSQL request")
+	}
+	if stream.message.query != "SELECT * FROM movies1" {
+		t.Error("Failed to parse query")
+	}
+	if stream.message.size != 74 {
+		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+}
+
+func TestMssqlParser_15x_response(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+
+	data := []byte("04010060003801008102000000000009" +
+		"0026040269006400000000000900e7c8" +
+		"000904d00034046e0061006d006500d1" +
+		"040a0000001c00460061007300740020" +
+		"002600200046007500720069006f0075" +
+		"007300fd1000c1000100000000000000")
+
+	message, err := hex.DecodeString(string(data))
+	if err != nil {
+		t.Error("Failed to decode hex string")
+	}
+
+	stream := &mssqlStream{data: message, message: new(mssqlMessage)}
+
+	ok, complete := mssql.mssqlMessageParser(stream)
+
+	if !ok {
+		t.Error("Parsing returned error")
+	}
+	if !complete {
+		t.Error("Expecting a complete message")
+	}
+	if stream.message.isRequest {
+		t.Error("Failed to parse MSSQL response")
+	}
+	if stream.message.size != 96 {
+		t.Errorf("Wrong message size %d", stream.message.size)
+	}
+
+	// parse fields and rows
+	raw := stream.data[stream.message.start:stream.message.end]
+	if len(raw) == 0 {
+		t.Errorf("Empty raw data")
+	}
+	fields, rows := parseQueryResponse(raw)
+	if len(fields) != 2 {
+		t.Errorf("Wrong number of fields")
+	}
+	if len(rows) != 1 {
+		t.Errorf("Wrong number of rows")
+	}
+	if len(rows[0]) != 2 {
+		t.Errorf("Wrong number of columns")
+	}
+}
+
+func TestMssql_15x_Login(t *testing.T) {
+	mssql := mssqlModForTests(nil)
+	// prelogin
+	data, err := hex.DecodeString("120100580000010000001f0006010025" +
+		"00010200260001030027000404002b00" +
+		"0105002c0024ff110a00010000000000" +
+		"00000000c9aab14d52d08f7404350e01" +
+		"e4424428fb94f8da059204fd8a2ed2e8" +
+		"f6f6bbef00000000")
+	if err != nil {
+		t.Errorf("Failed to decode string")
+	}
+	ts, err := time.Parse(time.RFC3339, "2000-12-26T01:15:06+04:20")
+	if err != nil {
+		t.Errorf("Failed to get ts")
+	}
+	pkt := protos.Packet{
+		Payload: data,
+		Ts:      ts,
+	}
+	var tuple common.TCPTuple
+	var private mssqlPrivateData
+
+	var loggedIn bool
+	countHandleMssql := 0
+
+	mssql.handleMssql = func(mssql *mssqlPlugin, m *mssqlMessage, tcp *common.TCPTuple,
+		dir uint8, raw_msg []byte,
+	) {
+		if m.login {
+			loggedIn = true
+		}
+		countHandleMssql++
+	}
+	mssql.Parse(&pkt, &tuple, tcp.TCPDirectionOriginal, private)
+
+	// server response
+	data, err = hex.DecodeString("040101fb00380100e31b0001066d0061" +
+		"007300740065007200066d0061007300" + "740065007200ab840045160000020025" +
+		"004300680061006e0067006500640020" + "00640061007400610062006100730065" +
+		"00200063006f006e0074006500780074" + "00200074006f00200027006d00610073" +
+		"0074006500720027002e00166d007500" + "61007a007a0061006d002d004c006100" +
+		"7400690074007500640065002d004500" + "35003400370030000001000000e30800" +
+		"07050904d0003400e31700020a750073" + "005f0065006e0067006c006900730068" +
+		"0000ab88004716000001002700430068" + "0061006e0067006500640020006c0061" +
+		"006e0067007500610067006500200073" + "0065007400740069006e006700200074" +
+		"006f002000750073005f0065006e0067" + "006c006900730068002e00166d007500" +
+		"61007a007a0061006d002d004c006100" + "7400690074007500640065002d004500" +
+		"35003400370030000001000000ad3600" + "0174000004164d006900630072006f00" +
+		"73006f00660074002000530051004c00" + "20005300650072007600650072000000" +
+		"00000f00108ce3130004043400300039" + "003600043400300039003600ae090200" +
+		"000001010a0100000001012e00000000" + "0900608114ffe7ffff00020207010401" +
+		"000504ffffffff060100070102080800" + "000000000000000904fffffffffffd00" +
+		"0000000000000000000000")
+	if err != nil {
+		t.Errorf("Failed to decode string")
+	}
+	pkt = protos.Packet{
+		Payload: data,
+		Ts:      ts,
+	}
+	mssql.Parse(&pkt, &tuple, tcp.TCPDirectionOriginal, private)
+
+	if !loggedIn {
+		t.Errorf("mssql login failed")
+	}
+
+	if mssql.version != 15 {
+		t.Errorf("mssql login wrong version")
+	}
+
+	if countHandleMssql != 2 {
+		t.Errorf("handleMssql not called")
 	}
 }

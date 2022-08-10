@@ -433,7 +433,7 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 	headerType := binary.LittleEndian.Uint16(s.data[s.parseOffset+16:])
 
 	if headerType != 0x02 {
-		logp.Warn("mssqldetailed", "wrong header: %x", headerType)
+		logp.Debug("mssqldetailed", "wrong header: %X", headerType)
 		return false, true // wrong header
 	}
 
@@ -588,7 +588,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				strRaw := data[offset+1 : offset+1+int(colNameLen*2)]
 				colName := utf16ToUtf8(strRaw)
 
-				logp.Debug("mssqldetailed", "parse col", colName, colType)
+				logp.Debug("mssqldetailed", "parse col %s %d", colName, colType)
 
 				fields = append(fields, Field{name: colName, lenSize: lenSize, varLen: varLen, colType: colType})
 				respFields = append(respFields, colName)
