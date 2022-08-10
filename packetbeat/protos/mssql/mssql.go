@@ -78,7 +78,6 @@ type mssqlTransaction struct {
 	method   string
 	bytesOut uint64
 	bytesIn  uint64
-	rowCount uint64
 	notes    []string
 	isError  bool
 
@@ -916,27 +915,36 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	trans.bytesOut = msg.size
 	trans.endTime = msg.ts
 
-	trans.rowCount = msg.rowCount
-
 	if msg.login {
 		trans.query = "N/A"
-		trans.mssql = mapstr.M{
+		trans.mssql.Update(mapstr.M{
 			"message":       "Login successful",
 			"version":       int(mssql.version),
 			"minor_version": int(mssql.versionMinor),
-		}
-	} else if mssql.version != 0 || len(mssql.dbName) > 0 {
-		trans.mssql = mapstr.M{
-			"version": int(mssql.version),
-			"db_name": mssql.dbName,
-		}
-	} else {
-		trans.mssql = mapstr.M{}
+		})
 	}
-	// dumping in CSV
+
+	if len(mssql.dbName) > 0 {
+		trans.mssql.Update(mapstr.M{
+			"db_name": mssql.dbName,
+		})
+	}
+
+	if msg.rowCount > 0 {
+		trans.mssql.Update(mapstr.M{
+			"row_count": msg.rowCount,
+		})
+	}
+
+	// dumping in CSV & transaction
 	if len(msg.raw) > 0 {
 		fields, rows := parseQueryResponse(msg.raw)
 		trans.responseRaw = common.DumpInCSVFormat(fields, rows)
+		if len(fields) > 0 {
+			trans.mssql.Update(mapstr.M{
+				"num_fields": len(fields),
+			})
+		}
 	}
 
 	trans.notes = append(trans.notes, msg.notes...)
@@ -973,7 +981,6 @@ func (mssql *mssqlPlugin) publishTransaction(t *mssqlTransaction) {
 	fields["method"] = t.method
 	fields["query"] = t.query
 	fields["mssql"] = t.mssql
-	fields["row_count"] = t.rowCount
 
 	if t.isError {
 		fields["status"] = common.ERROR_STATUS
