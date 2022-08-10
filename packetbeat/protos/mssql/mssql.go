@@ -365,6 +365,10 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 	s.message.size = uint64(s.message.end - s.message.start)
 
 	offset := 8
+	var expectDoneToken bool
+	if s.data[offset] == 0x81 { // metadata
+		expectDoneToken = true
+	}
 	for {
 		tokenType := s.data[offset]
 
@@ -421,14 +425,18 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 		flags := uint64(binary.LittleEndian.Uint16(s.data[offset+1:]))
 		if s.message.errorCode == 0 {
 			if flags&0x0002 == 1 {
+				s.message.notes = append(s.message.notes, "Error in done message")
 				logp.Debug("mssqldetailed", "done token error")
 
 			} else if flags&0x0100 == 1 {
+				s.message.notes = append(s.message.notes, "Server error")
 				logp.Debug("mssqldetailed", "done token server error")
 			}
 		}
 		s.message.rowCount = binary.LittleEndian.Uint64(s.data[offset+5:])
 		logp.Debug("mssqldetailed", "Row count %d", s.message.rowCount)
+	} else if expectDoneToken {
+		return true, false
 	}
 
 	return true, true
@@ -937,10 +945,10 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 	if msg.login {
 		trans.query = "N/A"
 		trans.mssql.Update(mapstr.M{
-			"message":       "Login successful",
 			"version":       int(mssql.version),
 			"minor_version": int(mssql.versionMinor),
 		})
+		trans.notes = append(trans.notes, "Login successful")
 	}
 
 	if len(mssql.dbName) > 0 {
