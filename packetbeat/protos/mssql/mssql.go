@@ -932,7 +932,7 @@ func (mssql *mssqlPlugin) receivedMssqlResponse(msg *mssqlMessage) {
 
 	if msg.rowCount > 0 {
 		trans.mssql.Update(mapstr.M{
-			"row_count": msg.rowCount,
+			"num_rows": msg.rowCount,
 		})
 	}
 
