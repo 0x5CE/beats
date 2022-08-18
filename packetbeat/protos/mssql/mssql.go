@@ -97,6 +97,35 @@ type mssqlStream struct {
 	message *mssqlMessage
 }
 
+// column types
+const (
+	dataType_NCHAR     = 0xEF
+	dataType_BIGVARCHR = 0xA7
+	dataType_BIGCHAR   = 0xAF
+	dataType_TEXT      = 0x23
+	dataType_NTEXT     = 0x63
+	dataType_MONEYN    = 0x6E
+	dataType_FLTN      = 0x6D
+	dataType_NVARCHAR  = 0xE7
+	dataType_INTN      = 0x26
+	dataType_MONEY     = 0x3C
+	dataType_FLT8      = 0x3E
+	dataType_FLT4      = 0x3B
+	dataType_DATETIME  = 0x3D
+	dataType_NUMERICN  = 0x6C
+	dataType_INT1      = 0x30
+)
+
+// token types
+const (
+	tokenType_METADATA  = 0x81
+	tokenType_NVCHG     = 0xE3
+	tokenType_INFO      = 0xAB
+	tokenType_LOGIN_ACK = 0xAD
+	tokenType_ROW       = 0xD1
+	tokenType_NBCROW    = 0xD2
+)
+
 type parseState int
 
 const (
@@ -355,7 +384,7 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 
 	logp.Debug("mssqldetailed", "Parsing response")
 
-	if int(length) < len(s.data) {
+	if int(length) > len(s.data) {
 		logp.Debug("mssqldetailed", "parseresponse: Incomplete message")
 		return true, false
 	}
@@ -366,7 +395,7 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 
 	offset := 8
 	var expectDoneToken bool
-	if s.data[offset] == 0x81 { // metadata
+	if s.data[offset] == tokenType_METADATA { // metadata
 		expectDoneToken = true
 	}
 	for {
@@ -377,7 +406,7 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 			s.message.ignoreMessage = true
 			offset = int(length) // break
 
-		case 0xE3: // envchange
+		case tokenType_NVCHG: // envchange
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			changeType := s.data[offset+3]
 			if changeType == 0x01 { // database changed
@@ -387,12 +416,12 @@ func (mssql *mssqlPlugin) parseResponse(s *mssqlStream) (bool, bool) {
 			offset += int(tokenSize) + 3
 			logp.Debug("mssqldetailed", "envchange")
 
-		case 0xAB: // info
+		case tokenType_INFO: // info
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			offset += int(tokenSize) + 3
 			logp.Debug("mssqldetailed", "info token")
 
-		case 0xAD: // loginAck
+		case tokenType_LOGIN_ACK: // loginAck
 			tokenSize := binary.LittleEndian.Uint16(s.data[offset+1:])
 			offset += int(tokenSize) + 3
 			s.message.login = true
@@ -450,7 +479,7 @@ func parseQueryBatch(s *mssqlStream) (bool, bool) {
 
 	logp.Debug("mssqldetailed", "parsequerybatch")
 
-	if int(length) < len(s.data) {
+	if int(length) > len(s.data) {
 		logp.Debug("mssqldetailed", "parsequerybatch: Incomplete message")
 		return true, false
 	}
@@ -484,7 +513,7 @@ func parsePrelogin(s *mssqlStream) (bool, bool) {
 	logp.Debug("mssqldetailed", "parse prelogin")
 
 	msgSize := binary.BigEndian.Uint16(s.data[2:])
-	if int(msgSize) != len(s.data) {
+	if int(msgSize) > len(s.data) {
 		logp.Debug("mssqldetailed", "parseprelogin: Incomplete message")
 		return true, false
 	}
@@ -521,7 +550,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 		switch tokenType {
 		// colmetadata
-		case 0x81:
+		case tokenType_METADATA:
 			nMetaCols := binary.LittleEndian.Uint16(data[offset:])
 
 			nCols = int(nMetaCols)
@@ -538,7 +567,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				switch colType {
 				// texttype / text
 				// ntexttype
-				case 0x63, 0x23:
+				case dataType_NTEXT, dataType_TEXT:
 					varLen = true
 					_ = int(binary.LittleEndian.Uint32(data[offset+1:]))
 					offset += 10 // skip colation
@@ -549,25 +578,25 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				// nchartype / nchar
 				// bigvarchartype / varchar
 				// bigchartype / char
-				case 0xEF, 0xA7, 0xAF:
+				case dataType_NCHAR, dataType_BIGVARCHR, dataType_BIGCHAR:
 					varLen = true
 					offset += 8
 					lenSize = 2
 
 				// fltntype / float
 				// moneyntype
-				case 0x6E, 0x6D:
+				case dataType_MONEYN, dataType_FLTN:
 					varLen = true
 					lenSize = 1
 					offset += 2
 
-				case 0xE7: // nvarchartype
+				case dataType_NVARCHAR: // nvarchartype
 					_ = int(binary.LittleEndian.Uint16(data[offset+1:]))
 					lenSize = 2
 					varLen = true
 					offset += 8 // skip collation
 
-				case 0x26: //intntype
+				case dataType_INTN: //intntype
 					colLen = int(data[offset+1])
 					if colLen <= 16 {
 						lenSize = 1
@@ -579,27 +608,27 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 
 				// flt8type
 				// moneytype
-				case 0x3C, 0x3E:
+				case dataType_MONEY, dataType_FLT8:
 					varLen = false
 					lenSize = 8
 					offset += 1
 
-				case 0x3B: // flt4type
+				case dataType_FLT4: // flt4type
 					varLen = false
 					lenSize = 4
 					offset += 1
 
-				case 0x30: // int1type
+				case dataType_INT1: // int1type
 					varLen = false
 					lenSize = 1
 					offset += 1
 
-				case 0x3D: // datetimetype
+				case dataType_DATETIME: // datetimetype
 					varLen = false
 					lenSize = 8
 					offset += 1
 
-				case 0x6C: // numerictype / numeric
+				case dataType_NUMERICN: // numerictype / numeric
 					varLen = true
 					offset += 4
 					lenSize = 1
@@ -622,11 +651,11 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 			}
 
 		// row, NBCRow (with some null values)
-		case 0xD1, 0xD2:
+		case tokenType_ROW, tokenType_NBCROW:
 			var nNullBitmap = int((len(fields)-1)/8) + 1
 			nullBitmap := make([]byte, nNullBitmap)
 
-			if tokenType == 0xD2 {
+			if tokenType == tokenType_NBCROW {
 				nullBitmap = data[offset : offset+nNullBitmap]
 				offset += nNullBitmap
 			} else {
@@ -648,7 +677,7 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				}
 
 				// ntexttype / texttype / text
-				if fields[i].colType == 0x63 || fields[i].colType == 0x23 {
+				if fields[i].colType == dataType_NTEXT || fields[i].colType == dataType_TEXT {
 					tpLen := data[offset]
 					// skipping timestamp and textptr
 					offset += int(tpLen) + 9
@@ -670,10 +699,10 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 				}
 
 				switch fields[i].colType {
-				case 0x26: // intntype
+				case dataType_INTN: // intntype
 					field = intNtoString(data[offset:], fieldSize)
 
-				case 0x6C: // numerictype / numeric
+				case dataType_NUMERICN: // numerictype / numeric
 					fs := fieldSize - 1
 					sign := data[offset]
 					field = intNtoString(data[offset+1:], fs)
@@ -681,27 +710,27 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 						field = "-" + field
 					}
 
-				case 0x30: // int1type
+				case dataType_INT1: // int1type
 					field = strconv.Itoa(int(data[offset]))
 
 				// texttype / text
 				// bigvarchartype / varchar
 				// bigchartype / char
-				case 0xAF, 0xA7, 0x23:
+				case dataType_BIGCHAR, dataType_BIGVARCHR, dataType_TEXT:
 					field = string(data[offset : offset+int(fieldSize)])
 
 				// ntexttype
 				// nvarchartype
 				// nchartype
-				case 0x63, 0xEF, 0xE7:
+				case dataType_NTEXT, dataType_NCHAR, dataType_NVARCHAR:
 					field = utf16ToUtf8(data[offset : offset+int(fieldSize)])
 
-				case 0x3D: // datetimetype
+				case dataType_DATETIME: // datetimetype
 					days := int32(binary.LittleEndian.Uint32(data[offset : offset+4]))
 					seconds := int32(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
 					field = datatimetypeToString(days, seconds)
 
-				case 0x6E: // moneyntype
+				case dataType_MONEYN: // moneyntype
 					switch fieldSize {
 					case 4:
 						field = moneytype4ToString(data)
@@ -709,18 +738,18 @@ func parseQueryResponse(data []byte) ([]string, [][]string) {
 						field = moneytype8ToString(data)
 					}
 
-				case 0x3C: // moneytype
+				case dataType_MONEY: // moneytype
 					field = moneytype8ToString(data)
 
-				case 0x3B: // flt4type
+				case dataType_FLT4: // flt4type
 					num := math.Float32frombits(binary.LittleEndian.Uint32(data[offset:]))
 					field = fmt.Sprintf("%f", num)
 
-				case 0x3E: // flt8type
+				case dataType_FLT8: // flt8type
 					num := math.Float64frombits(binary.LittleEndian.Uint64(data[offset:]))
 					field = fmt.Sprintf("%f", num)
 
-				case 0x6D: // fltntype / float
+				case dataType_FLTN: // fltntype / float
 					switch fieldSize {
 					case 4:
 						num := math.Float32frombits(binary.LittleEndian.Uint32(data[offset:]))
